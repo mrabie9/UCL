@@ -7,5 +7,5 @@ data/
 *.tar.gz
 *.zip
 extra/
-.ctn_env/
+.ucl_env/
 config.yaml

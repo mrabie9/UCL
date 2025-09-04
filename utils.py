@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 from torch.optim import Optimizer
 from tqdm import tqdm
-from torch._six import inf
+# from torch._six import inf
+from math import inf
 import pandas as pd
 from PIL import Image
 from sklearn.feature_extraction import image
@@ -108,11 +109,14 @@ class Adam(Optimizer):
                 state['step'] += 1
 
                 if group['weight_decay'] != 0:
-                    grad.add_(group['weight_decay'], p.data)
+                    # grad.add_(group['weight_decay'], p.data)
+                    grad.add_(p.data, alpha=group['weight_decay'])
 
                 # Decay the first and second moment running average coefficient
-                exp_avg.mul_(beta1).add_(1 - beta1, grad)
-                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+                # exp_avg.mul_(beta1).add_(1 - beta1, grad)
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                # exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
                 if amsgrad:
                     # Maintains the maximum of all 2nd moment running avg. till now
                     torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
@@ -124,7 +128,8 @@ class Adam(Optimizer):
                 bias_correction1 = 1 - beta1 ** state['step']
                 bias_correction2 = 1 - beta2 ** state['step']
                 
-                n = self.param_name[i]
+                # n = self.param_name[i]
+                n = self.param_name[i] if self.param_name is not None else None
                 
                 if 'rho' in self.param_name[i]:
                     step_size = self.lr_rho * math.sqrt(bias_correction2) / bias_correction1
@@ -132,7 +137,8 @@ class Adam(Optimizer):
                     step_size = group['lr'] * math.sqrt(bias_correction2) / bias_correction1
 
 #                 p.data.addcdiv_(-step_size, self.lr_scale[n] * exp_avg, denom)
-                p.data.addcdiv_(-step_size, exp_avg, denom)
+                # p.data.addcdiv_(-step_size, exp_avg, denom)
+                p.data.addcdiv_(exp_avg, denom, value=-step_size)
 
         return loss
 
@@ -154,7 +160,7 @@ def crop(x, patch_size, mode = 'train'):
             if random.random() > 0.5:
                 patch = np.flipud(patch)
             # Corrupt source image
-            patch = np.transpose(patch, (2,0,1))
+            # patch = np.transpose(patch, (2,0,1))
             patch = tvF.to_tensor(patch.copy())
             cropped_image.append(patch)
     elif mode == 'valid' or mode == 'test':
@@ -163,7 +169,7 @@ def crop(x, patch_size, mode = 'train'):
             H,W,C = patch.shape
             patch = patch[H//2-patch_size//2:H//2+patch_size//2, W//2-patch_size//2:W//2+patch_size//2,:]
             # Corrupt source image
-            patch = np.transpose(patch, (2,0,1))
+            # patch = np.transpose(patch, (2,0,1))
             patch = tvF.to_tensor(patch.copy())
             cropped_image.append(patch)
         
@@ -223,23 +229,50 @@ def compute_conv_output_size(Lin,kernel_size,stride=1,padding=0,dilation=1):
     return int(np.floor((Lin+2*padding-dilation*(kernel_size-1)-1)/float(stride)+1))
 
 ########################################################################################################################
-
 def compute_mean_std_dataset(dataset):
-    # dataset already put ToTensor
-    mean=0
-    std=0
-    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
-    for image, _ in loader:
-        mean+=image.mean(3).mean(2)
-    mean /= len(dataset)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=False, num_workers=0)
+    n = 0
+    mean = 0.0
+    M2 = 0.0  # sum of squares of diffs for variance (per-channel)
 
-    mean_expanded=mean.view(mean.size(0),mean.size(1),1,1).expand_as(image)
-    for image, _ in loader:
-        std+=(image-mean_expanded).pow(2).sum(3).sum(2)
+    for batch, _ in loader:
+        # batch: (B, C, H, W)
+        b = batch.size(0)
+        x = batch.view(b, batch.size(1), -1).float()  # (B, C, H*W)
+        mean_b = x.mean(dim=(0, 2))                   # (C,)
+        var_b = x.var(dim=(0, 2), unbiased=False)     # (C,)
 
-    std=(std/(len(dataset)*image.size(2)*image.size(3)-1)).sqrt()
+        # online update (per-channel)
+        if n == 0:
+            mean = mean_b
+            M2 = var_b
+            n = b
+        else:
+            delta = mean_b - mean
+            tot = n + b
+            mean = mean + delta * (b / tot)
+            M2 = (M2 * n + var_b * b + (delta ** 2) * (n * b / tot)) / tot
+            n = tot
 
+    std = torch.sqrt(M2)
     return mean, std
+
+# def compute_mean_std_dataset(dataset):
+#     # dataset already put ToTensor
+#     mean=0
+#     std=0
+#     loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
+#     for image, _ in loader:
+#         mean+=image.mean(3).mean(2)
+#     mean /= len(dataset)
+
+#     mean_expanded=mean.view(mean.size(0),mean.size(1),1,1).expand_as(image)
+#     for image, _ in loader:
+#         std+=(image-mean_expanded).pow(2).sum(3).sum(2)
+
+#     std=(std/(len(dataset)*image.size(2)*image.size(3)-1)).sqrt()
+
+#     return mean, std
 
 ########################################################################################################################
 
@@ -385,12 +418,15 @@ class logger(object):
             resultsLog.add(epoch=epoch_num, train_loss=loss,
                            test_loss=test_loss)
         """
-        df = pd.DataFrame([kwargs.values()], columns=kwargs.keys())
-        self.log = self.log.append(df, ignore_index=True)
+        # df = pd.DataFrame([kwargs.values()], columns=kwargs.keys())
+        # self.log = pd.concat(df, ignore_index=True)
+        df = pd.DataFrame([kwargs])
+        self.log = pd.concat([self.log, df], ignore_index=True)
 
 
     def save(self):
-        return self.log.to_csv(self.data_path, index=False, index_label=False)
+        # return self.log.to_csv(self.data_path, index=False, index_label=False)
+        return self.log.to_csv(self.data_path, index=False)
 
     def load(self, path=None):
         path = path or self.data_path

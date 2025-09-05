@@ -425,6 +425,10 @@ class logger(object):
 
 
     def save(self):
+        # Ensure the directory for the CSV exists
+        dir_path = os.path.dirname(self.data_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
         # return self.log.to_csv(self.data_path, index=False, index_label=False)
         return self.log.to_csv(self.data_path, index=False)
 
